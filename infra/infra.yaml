@@ -1,0 +1,347 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Proton integration with the Bitbucket Server
+
+Parameters:
+  BitbucketSecret:
+    Type: String
+    Description: Bitbucket webhook secret used to sign webhook events.
+    NoEcho: true
+  BitbucketServerUrl:
+    Type: String
+    Description: URL of your Bitbucket Server e.g. http://server:port
+  BitbucketToken:
+    Type: String
+    Description: Personal token generated to access the repositories
+    NoEcho: true
+  EndpointType:
+    Type: String
+    Description: Select the type of endpoint to integrate with the Lambda Function
+    AllowedValues:
+      - API Gateway
+      - Application Load Balancer
+  LBCIDR:
+    Type: String
+    Description: CIDR allowed to communicate with the Load Balancer. It should allow the Bitbucket server IP address. Leave it blank if you are using the API Gateway endpoint type.
+  LBSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets where the Application Load Balancer run. Leave it blank if you are using the API Gateway endpoint type.
+  LBSSLCertificateArn:
+    Type: String
+    Description: SSL Certificate to associate with the Application Load Balancer. Leave it blank if you are using the API Gateway endpoint type.
+  LambdaSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets where the Lambda Function run
+  S3RepositoryBucketName:
+    Type: String 
+    Description: S3 bucket name to store the Bitbucket repository content
+    AllowedPattern: '^[a-z]*$'
+    ConstraintDescription: This field should contain only lower case characters
+  VPCID:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID where the Application Load Balancer and the Lambda function run
+  WebProxyHost:
+    Type: String
+    Description: Hostname of your Proxy server used by the Lambda Function to access the Bitbucket server. If you don't need a web proxy leave it blank. e.g. myproxy.mydomain.com
+  WebProxyPort:
+    Type: String
+    Description: Port of your Proxy server used by the Lambda Function to access the Bitbucket server. If you don't need a web proxy leave it blank. e.g. 8080
+
+Conditions:
+  EndpointTypeALB: !Equals [ !Ref EndpointType, 'Application Load Balancer' ]
+  EndpointTypeAPIGW: !Equals [ !Ref EndpointType, 'API Gateway' ]
+
+Resources:
+  S3BucketProtonCode:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3RepositoryBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  S3ProcessorFunctionFileUploadPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: ProtonEnvS3ProcessorFunction
+        Ref: ProtonSvcS3ProcessorFunction
+      Principal: s3.amazonaws.com
+      SourceAccount:
+        Ref: AWS::AccountId
+      SourceArn: !Sub 'arn:aws:s3:::${S3BucketProtonCode}'
+
+  ProtonEnvS3ProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: imnr-bitbucket-integration
+        S3Key: ce024fe793ab662a78b82afb22cf40c0
+      Handler: app.handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt:
+          - IamRoleLambdaFunction
+          - Arn
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          KEEP_VERSIONS: 3
+          PROTON_ENV_TEMPLATE: multi-svc-env-bitbucket
+      Layers:
+        - Ref: ProtonEnvS3ProcessorFunctionDependenciesLayer
+  
+  ProtonSvcS3ProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: imnr-bitbucket-integration
+        S3Key: ab999b3682096790388f15f38a071342
+      Handler: app.handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt:
+          - IamRoleLambdaFunction
+          - Arn
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          KEEP_VERSIONS: 3
+          PROTON_SVC_TEMPLATE: multi-svc-env-bitbucket
+      Layers:
+        - Ref: ProtonSvcS3ProcessorFunctionDependenciesLayer
+
+  ProtonEnvS3ProcessorFunctionDependenciesLayer:
+    Type: AWS::Lambda::LayerVersion
+    DeletionPolicy: Retain
+    Properties:
+      Content:
+        S3Bucket: imnr-bitbucket-integration
+        S3Key: 719ebd0c8867f470a87e2164f5d3775b
+      Description: Dependencies for sam app
+      LayerName: sam-app-dependencies
+      CompatibleRuntimes:
+        - nodejs18.x
+      LicenseInfo: MIT
+
+  ProtonSvcS3ProcessorFunctionDependenciesLayer:
+    Type: AWS::Lambda::LayerVersion
+    DeletionPolicy: Retain
+    Properties:
+      Content:
+        S3Bucket: imnr-bitbucket-integration
+        S3Key: 719ebd0c8867f470a87e2164f5d3775b
+      Description: Dependencies for sam app
+      LayerName: sam-app-dependencies
+      CompatibleRuntimes:
+        - nodejs18.x
+      LicenseInfo: MIT
+  KMSKey: 
+    Type: AWS::KMS::Key
+    Properties: 
+      Description: "CMK used by the Lambda Function to encrypt the environment variables"
+      KeyPolicy: 
+        Version: "2012-10-17"
+        Id: "root"
+        Statement:
+        -
+            Sid: "Enable IAM User Permissions"
+            Effect: "Allow"
+            Principal: 
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          
+  IamPolicyLambdaFunction:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: AWS Proton integration with BitBucket Server
+      ManagedPolicyName: Proton-Bitbucket-Integration
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource:
+              - !Sub 'arn:aws:s3:::${S3BucketProtonCode}'
+              - !Sub 'arn:aws:s3:::${S3BucketProtonCode}/*'
+          - Effect: Allow
+            Action:
+              - kms:decrypt
+            Resource:
+              - !GetAtt KMSKey.Arn
+
+  IamRoleLambdaFunction:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref 'IamPolicyLambdaFunction'
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AdministratorAccess
+      RoleName: Proton-Bitbucket-Integration-Role
+
+  SgLambdaFunction:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG used by the Bitbucket Integration Lambda Function
+      GroupName: Proton-Bitbucket-Integration-Lambda
+      VpcId: !Ref VPCID
+
+  SgAlb:
+    Type: AWS::EC2::SecurityGroup
+    Condition: EndpointTypeALB
+    Properties:
+      GroupDescription: SG used by the Bitbucket Integration ALB
+      GroupName: Proton-Bitbucket-Integration-ALB
+      SecurityGroupIngress:
+        - CidrIp: !Ref LBCIDR
+          Description: Range of IP allowed to connect to the Load Balancer
+          FromPort: 443
+          ToPort: 443
+          IpProtocol: tcp
+      VpcId: !Ref VPCID
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: Proton-Bitbucket-Integration
+      Environment:
+        Variables:
+          BITBUCKET_SERVER_URL:
+            !Ref BitbucketServerUrl
+          BITBUCKET_TOKEN:
+            !Ref BitbucketToken
+          BITBUCKET_SECRET:
+            !Ref BitbucketSecret
+          S3BUCKET:
+            !Ref S3RepositoryBucketName
+          WEBPROXY_HOST:
+            !Ref WebProxyHost
+          WEBPROXY_PORT:
+            !Ref WebProxyPort
+      Handler: index.handler
+      KmsKeyArn: !GetAtt KMSKey.Arn
+      Role:
+        !GetAtt IamRoleLambdaFunction.Arn
+      Code: ../synccode
+      Runtime: nodejs16.x
+      Timeout: '30'
+      VpcConfig:
+        SecurityGroupIds:
+        - Ref: SgLambdaFunction
+        SubnetIds: !Ref LambdaSubnets
+
+  LambdaPermissionAlb:
+    Type: AWS::Lambda::Permission
+    Condition: EndpointTypeALB
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        !Ref LambdaFunction
+      Principal: elasticloadbalancing.amazonaws.com
+
+  LambdaPermissionAPIGw:
+    Type: AWS::Lambda::Permission
+    Condition: EndpointTypeAPIGW
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        !Ref LambdaFunction
+      Principal: apigateway.amazonaws.com
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: EndpointTypeALB
+    Properties:
+      Name: pro-bitbucket-int
+      Scheme: internet-facing
+      SecurityGroups:
+      - Ref: SgAlb
+      Subnets: !Ref LBSubnets
+      IpAddressType: ipv4
+
+  AlbListener443:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: EndpointTypeALB
+    Properties:
+      DefaultActions:
+      - TargetGroupArn:
+          Ref: TargetGroup
+        Type: forward
+      LoadBalancerArn:
+        Ref: Alb
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+      - CertificateArn:
+          Ref: LBSSLCertificateArn
+
+  TargetGroup:
+    DependsOn: LambdaPermissionAlb
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Condition: EndpointTypeALB
+    Properties:
+      TargetType: lambda
+      Name: pro-bitbucket-int
+      Targets:
+      - Id: !GetAtt LambdaFunction.Arn
+
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Condition: EndpointTypeAPIGW
+    Properties: 
+      Description: API used by the AWS Proton integration with the Bitbucket Server
+      EndpointConfiguration: 
+        Types: 
+          - REGIONAL
+      Name: Proton-Bitbucket-Integration
+
+  RestApiMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: EndpointTypeAPIGW
+    Properties: 
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration: 
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations'
+      ResourceId: !GetAtt
+        - RestApi
+        - RootResourceId
+      RestApiId: !Ref RestApi
+
+  RestApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Condition: EndpointTypeAPIGW
+    DependsOn: RestApiMethod
+    Properties: 
+      Description: Stage Deployment
+      RestApiId: !Ref RestApi
+      StageName: prod
+
+Outputs:
+  EndpointUrlAlb:
+    Condition: EndpointTypeALB
+    Value:
+      Fn::GetAtt:
+      - Alb
+      - DNSName
+  EndpointUrlApiGw:
+    Condition: EndpointTypeAPIGW
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/"
+

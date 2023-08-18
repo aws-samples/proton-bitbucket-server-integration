@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "diff": "latest",
+    "aws-sdk": "latest",
+    "tar-fs": "^2.1.1",
+    "zlib": "^1.0.5"
+  }
+}
